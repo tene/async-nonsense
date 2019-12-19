@@ -1,49 +1,74 @@
-use async_stream::try_stream;
-use futures::{
-    pin_mut, select,
-    stream::{Stream, StreamExt},
-};
-use std::net::SocketAddr;
+use futures::{pin_mut, select, FutureExt};
+use std::{collections::HashMap, net::SocketAddr};
 use tokio::{
-    io,
-    net::{TcpListener, TcpStream, ToSocketAddrs},
+    io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader, ReadHalf, WriteHalf},
+    net::{TcpListener, TcpStream},
+    sync::mpsc::{channel, Receiver, Sender},
     task,
 };
 
-fn bind_and_accept<A: ToSocketAddrs>(
-    addr: A,
-) -> impl Stream<Item = io::Result<(TcpStream, SocketAddr)>> {
-    try_stream! {
-        let mut listener = TcpListener::bind(addr).await?;
+#[derive(Debug)]
+enum Event {
+    NewConnection(SocketAddr, TcpStream),
+    Msg(SocketAddr, String),
+    ClosedConnection(SocketAddr),
+}
 
-        loop {
-            let (stream, addr) = listener.accept().await?;
-            println!("received on {:?}", addr);
-            yield (stream, addr);
+async fn echo_thread(
+    addr: SocketAddr,
+    client_rx: ReadHalf<TcpStream>,
+    mut events_tx: Sender<Event>,
+) {
+    let mut client_lines = BufReader::new(client_rx).lines();
+    loop {
+        match client_lines.next_line().await {
+            Ok(Some(line)) => {
+                events_tx.send(Event::Msg(addr, line)).await.unwrap();
+            }
+            _ => break,
+        }
+    }
+    events_tx.send(Event::ClosedConnection(addr)).await.unwrap();
+}
+
+async fn echo_server(events_tx: Sender<Event>, mut events_rx: Receiver<Event>) {
+    let mut conns: HashMap<SocketAddr, WriteHalf<TcpStream>> = HashMap::new();
+    loop {
+        use Event::*;
+        match events_rx.recv().await {
+            Some(NewConnection(addr, stream)) => {
+                let (client_rx, client_tx) = io::split(stream);
+                conns.insert(addr, client_tx);
+                task::spawn(echo_thread(addr, client_rx, events_tx.clone()));
+            }
+            Some(Msg(addr, line)) => {
+                let msg: String = format!("{}: {}\n", addr, line);
+                for client in conns.values_mut() {
+                    client.write_all(msg.as_bytes()).await.unwrap();
+                }
+            }
+            Some(ClosedConnection(addr)) => {
+                conns.remove(&addr);
+            }
+            None => break,
         }
     }
 }
 
-async fn echo_server(s: TcpStream) -> io::Result<()> {
-    let (mut recv, mut send) = io::split(s);
-    io::copy(&mut recv, &mut send).await?;
-    Ok(())
-}
-
 #[tokio::main]
-async fn main() -> io::Result<()> {
-    let listener = bind_and_accept("127.0.0.1:8080").fuse();
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind("127.0.0.1:8080").await?;
+    let (mut events_tx, events_rx) = channel::<Event>(128);
+    task::spawn(echo_server(events_tx.clone(), events_rx));
     pin_mut!(listener);
 
     loop {
         select! {
-        ms = listener.next() =>
-            match ms {
-                Some(Ok((socket, _))) => {
-                    task::spawn(echo_server(socket));
-                },
-                _ => {}
+            accepted = listener.accept().fuse() => match accepted {
+                Ok((socket, addr)) => events_tx.send(Event::NewConnection(addr, socket)).await?,
+                _ => break,
             },
         }
     }
+    Ok(())
 }
