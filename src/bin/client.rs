@@ -3,7 +3,7 @@ use linefeed::{Interface, ReadResult};
 use std::sync::Arc;
 use tokio::sync::mpsc::channel;
 
-use chat::connection::{connect_framed, Frame};
+use chat::connection::{connect_framed_unix, Frame};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -23,7 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     let input_lines = input_lines.fuse();
-    let (mut frames_tx, frames_rx) = connect_framed("127.0.0.1:8080").await?;
+    let (mut frames_tx, frames_rx) = connect_framed_unix("chat.socket").await?;
     let mut frames_rx = frames_rx;
     pin_mut!(input_lines);
     loop {
