@@ -1,29 +1,33 @@
-use futures::{pin_mut, select, FutureExt, Sink, SinkExt, Stream, StreamExt};
+use futures::{pin_mut, select, SinkExt, StreamExt};
 use std::{collections::HashMap, net::SocketAddr};
 use tokio::{
-    net::{TcpListener, TcpStream},
     sync::mpsc::{channel, Receiver, Sender},
     task,
 };
 
-use chat::event::{self, wrap_client_conn, ClientEvent, ServerEvent};
+use chat::connection::{listen_framed, Frame, FrameReceiver, FrameSender};
 
-#[derive(Debug)]
 enum Event {
-    NewConnection(SocketAddr, TcpStream),
-    Client(SocketAddr, ClientEvent),
+    NewConnection((FrameSender, FrameReceiver), SocketAddr),
+    Client(SocketAddr, Frame),
     ClosedConnection(SocketAddr),
 }
 
-async fn echo_thread(
-    addr: SocketAddr,
-    client_rx: impl Stream<Item = Result<ClientEvent, event::Error>>,
-    mut events_tx: Sender<Event>,
-) {
+impl std::fmt::Debug for Event {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use Event::*;
+        match self {
+            NewConnection(_, addr) => write!(f, "NewConnection({:?})", addr),
+            e => e.fmt(f),
+        }
+    }
+}
+
+async fn echo_thread(addr: SocketAddr, client_rx: FrameReceiver, mut events_tx: Sender<Event>) {
     pin_mut!(client_rx);
     loop {
         match client_rx.next().await {
-            Some(Ok(evt)) => events_tx.send(Event::Client(addr, evt)).await.unwrap(),
+            Some(Ok(frame)) => events_tx.send(Event::Client(addr, frame)).await.unwrap(),
             _ => break,
         }
     }
@@ -31,25 +35,18 @@ async fn echo_thread(
 }
 
 async fn echo_server(events_tx: Sender<Event>, mut events_rx: Receiver<Event>) {
-    let mut conns: HashMap<
-        SocketAddr,
-        std::pin::Pin<Box<dyn Sink<ServerEvent, Error = event::Error> + Send>>,
-    > = HashMap::new();
+    let mut conns: HashMap<SocketAddr, FrameSender> = HashMap::new();
     loop {
         use Event::*;
         match events_rx.recv().await {
-            Some(NewConnection(addr, stream)) => {
-                let (client_tx, client_rx) = wrap_client_conn(stream);
-                conns.insert(addr, Box::pin(client_tx));
+            Some(NewConnection((client_tx, client_rx), addr)) => {
+                conns.insert(addr, client_tx);
                 task::spawn(echo_thread(addr, client_rx, events_tx.clone()));
             }
-            Some(Client(addr, evt)) => match evt {
-                ClientEvent::Msg(line) => {
+            Some(Client(_addr, evt)) => match evt {
+                Frame::Msg(line) => {
                     for client in conns.values_mut() {
-                        client
-                            .send(ServerEvent::Msg(addr, line.clone()))
-                            .await
-                            .unwrap();
+                        client.send(Frame::Msg(line.clone())).await.unwrap();
                     }
                 }
             },
@@ -63,15 +60,15 @@ async fn echo_server(events_tx: Sender<Event>, mut events_rx: Receiver<Event>) {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let listener = TcpListener::bind("127.0.0.1:8080").await?;
+    let incoming = listen_framed("127.0.0.1:8080").await?;
     let (mut events_tx, events_rx) = channel::<Event>(128);
     task::spawn(echo_server(events_tx.clone(), events_rx));
-    pin_mut!(listener);
+    pin_mut!(incoming);
 
     loop {
         select! {
-            accepted = listener.accept().fuse() => match accepted {
-                Ok((socket, addr)) => events_tx.send(Event::NewConnection(addr, socket)).await?,
+            accepted = incoming.next() => match accepted {
+                Some((socket, addr)) => events_tx.send(Event::NewConnection(socket, addr)).await?,
                 _ => break,
             },
         }

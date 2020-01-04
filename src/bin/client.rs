@@ -3,7 +3,7 @@ use linefeed::{Interface, ReadResult};
 use std::sync::Arc;
 use tokio::sync::mpsc::channel;
 
-use chat::event::{connect_to_server, ClientEvent, ServerEvent};
+use chat::connection::{connect_framed, Frame};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -23,20 +23,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     let input_lines = input_lines.fuse();
-    let (mut events_tx, events_rx) = connect_to_server("127.0.0.1:8080").await?;
-    let mut events_rx = events_rx.fuse();
+    let (mut frames_tx, frames_rx) = connect_framed("127.0.0.1:8080").await?;
+    let mut frames_rx = frames_rx;
     pin_mut!(input_lines);
     loop {
         select! {
             line = input_lines.next() => match line {
                 Some(line) => {
-                    let rv = events_tx.send(ClientEvent::Msg(line)).await?;
+                    let rv = frames_tx.send(Frame::Msg(line)).await?;
                 },
                 None => break,
             },
-            evt = events_rx.next() => match evt {
-                Some(Ok(ServerEvent::Msg(addr, line))) => {
-                    writeln!(interface, "{}: {}", addr, line)?;
+            evt = frames_rx.next() => match evt {
+                Some(Ok(Frame::Msg(line))) => {
+                    writeln!(interface, "{}", line)?;
                 },
                 _ => break,
             },
