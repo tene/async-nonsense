@@ -9,6 +9,8 @@ use tokio::{
 };
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
+use crate::connection::AgentId;
+
 #[derive(Debug)]
 pub enum Addr {
     Tcp(std::net::SocketAddr),
@@ -17,54 +19,50 @@ pub enum Addr {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Frame {
+    Hello(AgentId),
     Msg(String),
+    Error(String),
 }
 
 pub type FrameSender = Pin<Box<dyn Sink<Frame, Error = FrameError> + Send>>;
 pub type FrameReceiver = Pin<Box<dyn FusedStream<Item = Result<Frame, FrameError>> + Send>>;
+pub type FrameListener = Pin<Box<dyn FusedStream<Item = (Frames, Addr)> + Send>>;
+pub type Frames = (FrameSender, FrameReceiver);
 
-pub async fn listen_framed_tcp<S: ToSocketAddrs>(
-    s: S,
-) -> tokio::io::Result<impl FusedStream<Item = ((FrameSender, FrameReceiver), Addr)>> {
+pub async fn listen_framed_tcp<S: ToSocketAddrs>(s: S) -> tokio::io::Result<FrameListener> {
     let mut listener = TcpListener::bind(s).await?;
-    Ok(stream! {
+    Ok(Box::pin(stream! {
         loop {
             match listener.accept().await {
                 Ok((socket, addr)) => yield (frame_io(socket), Addr::Tcp(addr)),
                 _ => break, // Is this right?
             }
         }
-    })
+    }))
 }
-pub async fn listen_framed_unix<P: AsRef<Path>>(
-    path: P,
-) -> tokio::io::Result<impl FusedStream<Item = ((FrameSender, FrameReceiver), Addr)>> {
+pub async fn listen_framed_unix<P: AsRef<Path>>(path: P) -> tokio::io::Result<FrameListener> {
     let mut listener = UnixListener::bind(path)?;
-    Ok(stream! {
+    Ok(Box::pin(stream! {
         loop {
             match listener.accept().await {
                 Ok((socket, addr)) => yield (frame_io(socket), Addr::Unix(addr)),
                 _ => break, // Is this right?
             }
         }
-    })
+    }))
 }
 
-pub async fn connect_framed_tcp<S: ToSocketAddrs>(
-    s: S,
-) -> tokio::io::Result<(FrameSender, FrameReceiver)> {
+pub async fn connect_framed_tcp<S: ToSocketAddrs>(s: S) -> tokio::io::Result<Frames> {
     let socket = TcpStream::connect(s).await?;
     Ok(frame_io(socket))
 }
 
-pub async fn connect_framed_unix<P: AsRef<Path>>(
-    path: P,
-) -> tokio::io::Result<(FrameSender, FrameReceiver)> {
+pub async fn connect_framed_unix<P: AsRef<Path>>(path: P) -> tokio::io::Result<Frames> {
     let socket = UnixStream::connect(path).await?;
     Ok(frame_io(socket))
 }
 
-pub fn frame_io<IO>(io: IO) -> (FrameSender, FrameReceiver)
+pub fn frame_io<IO>(io: IO) -> Frames
 where
     IO: 'static + AsyncRead + AsyncWrite + Send,
 {
