@@ -1,4 +1,4 @@
-use futures::{select, SinkExt, StreamExt};
+use futures::{pin_mut, select, SinkExt, StreamExt};
 use slab::Slab;
 use std::{path::Path, sync::Arc};
 use tokio::{
@@ -10,7 +10,7 @@ use tokio::{
 };
 
 use crate::connection::{
-    connect_framed_unix, listen_framed_unix, AgentId, Frame, FrameListener, FrameSender, Frames,
+    connect_framed_unix, listen_framed_unix, AgentId, Frame, FrameListener, Frames,
 };
 
 #[derive(Clone)]
@@ -117,14 +117,27 @@ async fn run_web(id: AgentId, ctl_tx: Sender<Control>, ctl_rx: Receiver<Control>
 
 async fn handle_connection(
     id: AgentId,
-    conns: Arc<Mutex<Slab<FrameSender>>>,
+    conns: Arc<Mutex<Slab<Sender<Frame>>>>,
     (mut frame_tx, mut frame_rx): Frames,
 ) {
-    let _ = frame_tx.send(Frame::Hello(id));
+    let _ = frame_tx.send(Frame::Hello(id)).await;
     match frame_rx.next().await {
         Some(Ok(Frame::Hello(_other_id))) => {
-            let idx = conns.lock().await.insert(frame_tx);
-            let mut err_desc: Option<String> = None;
+            let (tx_ch, mut rx_ch) = channel::<Frame>(128);
+            task::spawn(async move {
+                loop {
+                    match rx_ch.recv().await {
+                        Some(frame) => match frame_tx.send(frame).await {
+                            Ok(()) => {}
+                            Err(_) => break,
+                        },
+                        None => break,
+                    }
+                }
+            });
+            let frame_tx = tx_ch;
+            pin_mut!(frame_tx);
+            let idx = conns.lock().await.insert(frame_tx.clone());
             loop {
                 match frame_rx.next().await {
                     Some(Ok(frame)) => match frame {
@@ -138,21 +151,21 @@ async fn handle_connection(
                             }
                         }
                         Frame::Hello(_) => {
-                            err_desc.replace("Unexpected Hello".to_owned());
+                            let _ = frame_tx
+                                .send(Frame::Error("Unexpected Hello".to_owned()))
+                                .await;
                             break;
                         }
                         Frame::Error(e) => {
                             eprintln!("{}: Error {}", idx, e);
                             break;
                         }
+                        _ => {}
                     },
                     _ => break,
                 }
             }
-            let mut frame_tx = conns.lock().await.remove(idx);
-            if let Some(e) = err_desc {
-                let _ = frame_tx.send(Frame::Error(e)).await;
-            }
+            let _ = conns.lock().await.remove(idx);
         }
         frame => {
             let _ = frame_tx

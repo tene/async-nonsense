@@ -3,10 +3,9 @@ pub use framing::*;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AgentId {
-    hostname: String,
-    pid: u32,
+    name: String,
 }
 
 fn guess_hostname() -> String {
@@ -20,14 +19,15 @@ fn guess_hostname() -> String {
 }
 
 impl AgentId {
-    pub fn new<S: Into<String>>(hostname: S, pid: u32) -> Self {
-        let hostname = hostname.into();
-        Self { hostname, pid }
+    pub fn new<S: Into<String>>(name: S) -> Self {
+        let name = name.into();
+        Self { name }
     }
     pub fn new_local() -> Self {
         let hostname = guess_hostname();
         let pid = std::process::id();
-        Self { hostname, pid }
+        let name = format!("{}+{}", hostname, pid).into();
+        Self { name }
     }
 }
 

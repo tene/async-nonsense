@@ -21,6 +21,7 @@ pub enum Addr {
 pub enum Frame {
     Hello(AgentId),
     Msg(String),
+    Peers(Vec<(AgentId, usize)>),
     Error(String),
 }
 
