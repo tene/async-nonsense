@@ -1,5 +1,4 @@
-pub mod framing;
-pub use framing::*;
+pub(crate) mod framing;
 
 use serde::{Deserialize, Serialize};
 
@@ -29,9 +28,4 @@ impl AgentId {
         let name = format!("{}+{}", hostname, pid).into();
         Self { name }
     }
-}
-
-pub enum Event {
-    ConnectionEstablished,
-    ConnectionTerminated,
 }

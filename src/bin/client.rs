@@ -1,9 +1,9 @@
-use futures::{pin_mut, select, sink::SinkExt, stream::StreamExt};
+use futures::{pin_mut, select, stream::StreamExt};
 use linefeed::{Interface, ReadResult};
 use std::sync::Arc;
 use tokio::sync::mpsc::channel;
 
-use chat::connection::{connect_framed_unix, Frame};
+use chat::web::Web;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -23,19 +23,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     let input_lines = input_lines.fuse();
-    let (mut frames_tx, frames_rx) = connect_framed_unix("chat.socket").await?;
-    let mut frames_rx = frames_rx;
-    pin_mut!(input_lines);
+    let mut web = Web::new().await;
+    web.connect_unix("chat.socket").await?;
+    let msg_rx = web.observe().await;
+    let msg_rx = msg_rx.fuse();
+    pin_mut!(input_lines, msg_rx);
     loop {
         select! {
             line = input_lines.next() => match line {
                 Some(line) => {
-                    let rv = frames_tx.send(Frame::Msg(line)).await?;
+                    web.broadcast(line).await?;
                 },
                 None => break,
             },
-            evt = frames_rx.next() => match evt {
-                Some(Ok(Frame::Msg(line))) => {
+            msg = msg_rx.next() => match msg {
+                Some(line) => {
                     writeln!(interface, "{}", line)?;
                 },
                 _ => break,

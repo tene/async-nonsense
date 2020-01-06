@@ -19,7 +19,21 @@ impl Peers {
     pub fn best_link(&self, id: &AgentId) -> Option<usize> {
         self.best.get(id).map(|b| b.0)
     }
-    pub fn peers(
+    pub fn peer_table<'a>(&'a self) -> impl Iterator<Item = (AgentId, usize)> + 'a {
+        self.best
+            .iter()
+            .cloned()
+            .map(|(k, (_, Distance(v)))| (k, v))
+    }
+    pub fn peer(&mut self, link: usize, id: AgentId) {
+        self.links
+            .entry(id.clone())
+            .or_default()
+            .insert(link, Distance(0));
+        self.best.insert(id.clone(), (link, Distance(0)));
+        self.cache.entry(link).or_default().insert(id, Distance(0));
+    }
+    pub fn update(
         &mut self,
         link: usize,
         id: AgentId,
@@ -98,10 +112,10 @@ mod test {
         let a1 = AgentId::new("foo");
         let a2 = AgentId::new("foo2");
         let a3 = AgentId::new("foo3");
-        let (new, lost) = peers.peers(0, a.clone(), vec![(a1.clone(), 0), (a2.clone(), 0)]);
+        let (new, lost) = peers.update(0, a.clone(), vec![(a1.clone(), 0), (a2.clone(), 0)]);
         assert_equal(sorted(new), sorted(vec![a.clone(), a1.clone(), a2.clone()]));
         assert_eq!(lost, vec![]);
-        let (new, lost) = peers.peers(0, a.clone(), vec![(a3.clone(), 0), (a2.clone(), 0)]);
+        let (new, lost) = peers.update(0, a.clone(), vec![(a3.clone(), 0), (a2.clone(), 0)]);
         assert_equal(sorted(new), sorted(vec![a3.clone()]));
         assert_eq!(lost, vec![a1.clone()]);
     }
